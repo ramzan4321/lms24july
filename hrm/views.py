@@ -1,4 +1,3 @@
-import datetime
 import os
 import math
 from django.contrib.auth.models import User
@@ -14,10 +13,10 @@ from hrm.models import HolidayList, Employee, EmployeeManager, EmployeeBankDetai
 from django.contrib.auth import login, authenticate, logout
 from django.contrib.auth import authenticate
 from core.utils.dates import Date, months
-from core.utils.leave import all_leaves as get_all_leaves, employee_leave_check, leave_can_approve
-from datetime import date, datetime
+from core.utils.leave import all_leaves as get_all_leaves, employee_leave_check, leave_can_approve, leave_calculate, leave_create
+from datetime import date, datetime, timedelta
 from core.utils.payslip_pdf import generate_pdf
-from core.utils.numtoword import numtowords
+from core.utils.numtoword import numtowords, fix_to_two_digit
 from core.utils.week import current_week, next_week, pre_week, week_calendar
 import calendar
 from django.contrib import messages
@@ -27,6 +26,7 @@ from .forms import LeaveManagementForm, UserRegisterForm, EmployeeProfileEditFor
 from django.views.generic import CreateView
 from django.shortcuts import get_object_or_404
 from hrm.choice import USER_ROLE
+from core.utils.mailer import Mailer
 
 
 class login_user(View):
@@ -105,7 +105,7 @@ class LeaveRequestView(View):
                     page = paginator.page(paginator.num_pages)
                 context = {
                     "page":page,
-                    "all_leave"       :all_leaves,
+                    "all_leave":all_leaves,
                     "emp":employee,
                     "next_date": current_week()['current_week_days'][-1].strftime("%b %d"),
                     "prev_date": current_week()['current_week_days'][0].strftime("%b %d"),
@@ -118,7 +118,7 @@ class LeaveRequestView(View):
                     if jsondata['status'] == 'found':
                         return JsonResponse(jsondata)
                 return render(request, 'admin/emp_leave.html', context)
-            pending_leaves = LeaveManagement.objects.filter(status = "PENDING")
+            pending_leaves = LeaveManagement.objects.filter(status = "PENDING").select_related('employee_id')
             
             if request.user.is_superuser and (request.GET.get('q') == "next" or request.GET.get('q') == "prev"):
                 jsondata = week_calendar(request.GET.get('q'), week)
@@ -142,7 +142,7 @@ class LeaveRequestView(View):
                 emply_list = []
                 all_emplys = Employee.objects.filter(department=employee.department, role="EMPLOYEE")
                 for x in all_emplys:
-                    emplys = LeaveManagement.objects.filter(employee_id=x,status="APPROVED")
+                    emplys = LeaveManagement.objects.filter(employee_id=x,status="APPROVED").select_related('employee_id')
                     if emplys:
                         for y in emplys:
                             y_days_in_leave = Date(y.leave_start_date).get_next_working_days(y.leave_days)
@@ -190,7 +190,9 @@ class LeaveRequestView(View):
                 employee_paid_leave = LeaveManagement.objects.filter(Q(employee_id=employee) & ((Q(status="APPROVED") | Q(status="PENDING")) & Q(leave_type="PAID")))
                 total_paid_leave = 0
                 for leave in employee_paid_leave:
-                    total_paid_leave = total_paid_leave+leave.leave_days
+                    _leave_day = leave.leave_days*1 if leave.leave_requested_for == 'F' else leave.leave_days*0.5
+                    print("Leave day : ", _leave_day)
+                    total_paid_leave = total_paid_leave + _leave_day
 
                 balance_paid_leave = 12 - total_paid_leave
                 if balance_paid_leave < 0:
@@ -216,7 +218,7 @@ class LeaveRequestView(View):
                     "all_leave":all_leaves,
                     "emp":employee,
                     "date":formatted_date,
-                    "bpl":balance_paid_leave,
+                    "bpl":int(balance_paid_leave) if ".0" in str(balance_paid_leave) else balance_paid_leave,
                     "next_date": current_week()['current_week_days'][-1].strftime("%b %d"),
                     "prev_date": current_week()['current_week_days'][0].strftime("%b %d"),
                     "emp_leave_list": week_calendar(),
@@ -240,94 +242,31 @@ class LeaveRequestView(View):
                 else:
                     leave.approve_leave()
                     messages.add_message(request, messages.INFO, "Requested leave has been approved.")
+                    return redirect("/leave/")
             elif request.POST.get('action') == "reject":
                 leave.reject_leave()
                 messages.add_message(request, messages.INFO, "Requested leave has been rejected.")
-            return redirect("/leave/")
-
+                return redirect("/leave/")
         form = LeaveManagementForm(request.POST, instance=None)
         emp  = EmployeeManager.objects.get(user=request.user)
         if form.is_valid() and emp.role == "EMPLOYEE":
             leave_reason = form.cleaned_data["leave_reason"]
-            leave_type = form.cleaned_data["leave_type"]
             leave_requested_for = form.cleaned_data["leave_requested_for"]
+            leave_type = form.cleaned_data["leave_type"]
             leave_days = form.cleaned_data["leave_days"]
             start_date = form.cleaned_data["leave_start_date"]
             leave_id = request.POST.get("leave_id")
-            _date = Date(start_date)
-            requested_leave_days = _date.get_next_working_days(leave_days)
-
+            
             if leave_id:
-                leave_check = employee_leave_check(emp, start_date, requested_leave_days, leave_id)
+                create_leave = leave_create(emp, leave_reason, int(leave_days), leave_requested_for, leave_type, start_date, leave_id)
             else:
-                leave_check = employee_leave_check(emp, start_date, requested_leave_days)
-            if leave_check["status"] == True:
-                messages.add_message(request, messages.WARNING, f"Leave for '{leave_check['date']}', is already requested.")
-                return redirect('/leave/')
-
-            if  leave_type == "PAID" or emp.get_all() >= int(request.POST.get("leave_days")) :
-                if requested_leave_days[-1].month > 6:
-                    employee_paid_leave = LeaveManagement.objects.filter(Q(employee_id=emp) & (Q(status="APPROVED") | Q(status="PENDING") & Q(leave_type="PAID")))
-                    leave_can_take = 12
-                else:
-                    employee_paid_leave = LeaveManagement.objects.filter(Q(employee_id=emp) & (Q(status="APPROVED") | Q(status="PENDING") & Q(leave_type="PAID")) & Q(leave_start_date__month__range=[1,6]))
-                    leave_can_take = 6
-                requested_paid_leave = int(leave_days)
-                total_paid_leave = 0
-                for leave in employee_paid_leave:
-                    total_paid_leave = total_paid_leave+leave.leave_days
-
-                if leave_can_take >= total_paid_leave + requested_paid_leave:
-                    form.save(leave_id, emp)
-                    # leave_record, created = LeaveManagement.objects.get_or_create(
-                    #     id = leave_id,
-                    #     defaults={
-                    #         "employee_id": emp,
-                    #         "leave_reason": leave_reason,
-                    #         "leave_days": leave_days,
-                    #         "leave_start_date": start_date,
-                    #         "leave_type": leave_type,
-                    #         "leave_requested_for": leave_requested_for,
-                    #         "status": "PENDING"
-                    #     }
-                    # )
-                    # if not created:
-                    #     leave_record.leave_reason = leave_reason
-                    #     leave_record.leave_days = leave_days
-                    #     leave_record.leave_start_date = start_date
-                    #     leave_record.leave_requested_for = leave_requested_for
-                    #     leave_record.leave_type = leave_type
-                    #     leave_record.status = "PENDING"
-                    #     leave_record.save()
-                    messages.add_message(request, messages.SUCCESS, f"Leave has been submitted. You have {leave_can_take -(total_paid_leave+requested_paid_leave)} paid leaves left.")
-                    return redirect('/leave/')
-                else:
-                    messages.add_message(request, messages.WARNING, "Sorry, You can only take 6 Paid leave during 'January to June' and 6 Paid leave during 'July to December'.")
-                    return redirect(request.path)
+                create_leave = leave_create(emp, leave_reason, int(leave_days), leave_requested_for, leave_type, start_date)
+            if create_leave['status'] == True:
+                messages.add_message(request, messages.SUCCESS, create_leave['message'])
+                return redirect('./')
             else:
-                form.save(leave_id, emp)
-                # leave_record, created = LeaveManagement.objects.get_or_create(
-                #     id = leave_id,
-                #     defaults={
-                #         "employee_id": emp,
-                #         "leave_reason": leave_reason,
-                #         "leave_days": leave_days,
-                #         "leave_start_date": start_date,
-                #         "leave_type": leave_type,
-                #         "leave_requested_for": leave_requested_for,
-                #         "status": "PENDING"
-                #     }
-                # )
-                # if not created:
-                #     leave_record.leave_reason = leave_reason
-                #     leave_record.leave_days = leave_days
-                #     leave_record.leave_start_date = start_date
-                #     leave_record.leave_requested_for = leave_requested_for
-                #     leave_record.leave_type = leave_type
-                #     leave_record.status = "PENDING"
-                #     leave_record.save()
-                messages.add_message(request, messages.SUCCESS, "Leave has been submitted.")
-                return redirect("./")
+                messages.add_message(request, messages.WARNING, create_leave['error'])
+                return redirect('./')
         else:
             error_list = " "
             for field, errors in form.errors.items():
@@ -389,32 +328,6 @@ class EmpBankDetail(View):
         form = EmployeeBankDetailsEditForm(request.POST, instance=None)
         if form.is_valid():
             form.save(employee)
-            # bank_name = form.cleaned_data['bank_name']
-            # branch = form.cleaned_data['branch']
-            # bank_account_no = form.cleaned_data['bank_account_no']
-            # account_holder_name = form.cleaned_data['account_holder_name']
-            # ifsc_code = form.cleaned_data['ifsc_code']
-            # pan_no = form.cleaned_data['pan_no']
-
-            # bank_detail, created = EmployeeBankDetail.objects.get_or_create(
-            # employee_bankdetail = employee,
-            # defaults={
-            #     'bank_name': bank_name,
-            #     'branch': branch,
-            #     'bank_account_no': bank_account_no,
-            #     'account_holder_name': account_holder_name,
-            #     'ifsc_code': ifsc_code,
-            #     'pan_no': pan_no,
-            #     }
-            # )
-            # if not created:
-            #     bank_detail.bank_name = bank_name
-            #     bank_detail.branch = branch
-            #     bank_detail.bank_account_no = bank_account_no
-            #     bank_detail.account_holder_name = account_holder_name
-            #     bank_detail.ifsc_code = ifsc_code
-            #     bank_detail.pan_no = pan_no
-            #     bank_detail.save()
             bank_detail = EmployeeBankDetail.objects.filter(employee_bankdetail=employee).first()
             messages.add_message(request, messages.SUCCESS, "Bank details updated successfully.")
         else:
@@ -452,30 +365,6 @@ class EmployeeProfileView(LoginRequiredMixin, View):
             if form.is_valid():
                 manager = request.POST.get('manager')
                 form.save(pk, manager)
-                # designation = form.cleaned_data['designation']
-                # role = form.cleaned_data['role']
-                # department = form.cleaned_data['department']
-                # salary = form.cleaned_data['salary']
-                # manager = request.POST.get('manager')
-                # manager_instance = Employee.objects.get(user=manager)
-                # emp_detail, created = Employee.objects.get_or_create(
-                # user = pk,
-                # defaults={
-                #     'designation': designation,
-                #     'role': role,
-                #     'department': department,
-                #     'salary': salary,
-                #     'manager': manager_instance,
-                #     }
-                # )
-                # if not created:
-                #     emp_detail.designation = designation
-                #     emp_detail.role = role
-                #     emp_detail.department = department
-                #     emp_detail.salary = salary
-                #     emp_detail.manager = manager_instance
-                #     emp_detail.save()
-                # employee = Employee.objects.get(user = pk)
                 messages.add_message(request, messages.SUCCESS, "Profile updated successfully.")
             else:
                 error_list = " "
@@ -489,42 +378,7 @@ class EmployeeProfileView(LoginRequiredMixin, View):
             form = EmployeeProfileEditForm(request.POST, request.FILES, instance=None)
             employee = Employee.objects.get(user = request.user)
             if form.is_valid() and employee.role == "EMPLOYEE":
-                result = form.save(request.user)
-                print("REsult: ",result)
-                # name = form.cleaned_data['name']
-                # profile_image = form.cleaned_data['profile_image']
-                # gender = form.cleaned_data['genderselect']
-                # dob = form.cleaned_data['dob']
-                # mobile = form.cleaned_data['mobile']
-                # address = form.cleaned_data['address']
-                # pincode = form.cleaned_data['pincode']
-                # city = form.cleaned_data['city']
-                # state = form.cleaned_data['state']
-                # emp_detail, created = Employee.objects.get_or_create(
-                # user = request.user,
-                # defaults={
-                #     'name': name,
-                #     'profile_image': profile_image,
-                #     'gender': gender,
-                #     'dob': dob,
-                #     'mobile': mobile,
-                #     'address': address,
-                #     'pincode': pincode,
-                #     'city': city,
-                #     'state': state,
-                #     }
-                # )
-                # if not created:
-                #     emp_detail.name = name
-                #     emp_detail.profile_image = profile_image
-                #     emp_detail.gender = gender
-                #     emp_detail.dob = dob
-                #     emp_detail.mobile = mobile
-                #     emp_detail.address = address
-                #     emp_detail.pincode = pincode
-                #     emp_detail.city = city
-                #     emp_detail.state = state
-                #     emp_detail.save()
+                form.save(request.user)
                 messages.add_message(request, messages.SUCCESS, "Profile updated successfully.")
             else:
                 error_list = " "
@@ -532,7 +386,6 @@ class EmployeeProfileView(LoginRequiredMixin, View):
                     for error in errors:
                         error_list += error+' ,'
                 error_list = error_list[:-1]
-                print(error_list)
                 messages.add_message(request, messages.WARNING, error_list)
             return redirect('./')
 
@@ -598,7 +451,8 @@ class ProfileListView(LoginRequiredMixin, View):
                 employee = None
                 return render(request, 'hrm/profile.html',  { "holidaylist":holiday})
 
-#for manage employee and admin payroll
+
+# for manage employee and admin payroll
 class PayRollView(LoginRequiredMixin, View):
     global PRE_MONTH, TOTAL_DAYS, DATE_OBJECT, SALARY_MONTH, MONTH_LIST
     #-----------here we are calculating all months detail------------------------------
@@ -617,7 +471,7 @@ class PayRollView(LoginRequiredMixin, View):
             payslip = PaySlip.objects.filter(
                 dispatch_date__month=1 if month == 12 else month+1,
                 dispatch_date__year=year+1 if month == 12 else year,
-                )
+                ).select_related('employee_payslip')
             _today = _today.replace(month=month, year=year, day=1)
 
             current_year = _today.year
@@ -627,7 +481,7 @@ class PayRollView(LoginRequiredMixin, View):
                 employee_payslip = request.GET.get('employee_id'),
                 dispatch_date__month=1 if month == 12 else month+1,
                 dispatch_date__year=year+1 if month == 12 else year
-                ).first()
+                ).select_related('employee_payslip').first()
                 jsondata = {
                     'payslip':payslip.path if payslip else "Not found",
                     'month_list':MONTH_LIST,
@@ -639,9 +493,12 @@ class PayRollView(LoginRequiredMixin, View):
                 'effectiveworks': Date(_today).total_days(),
                 'total_leave_days':0,
                 'payslips':payslip,
+                'dispatched_payslip': False if payslip.filter(dispatched_payslip=False) else True,
+                'admin_confirmation':False if payslip.filter(admin_confirmation=False) else True,
                 'month_list':MONTH_LIST,
                 'total_employees':
                  Employee.objects.count(),
+                'employees': Employee.objects.filter(role="EMPLOYEE"),
                 'months':months(),
                 'cur': date.today(),
                 'curr_year':date.today().year,
@@ -657,10 +514,11 @@ class PayRollView(LoginRequiredMixin, View):
                 employee = Employee.objects.get(user = request.user )
                 payslip = PaySlip.objects.filter(employee_payslip = employee,
                                     dispatch_date__month=1 if month == 12 else month+1,
-                                    dispatch_date__year=year+1 if month == 12 else year
-                                    ).first()
+                                    dispatch_date__year=year+1 if month == 12 else year,
+                                    admin_confirmation=True
+                                    ).select_related('employee_payslip').first()
                 if not payslip and request.GET.get('q') != "ajax":
-                    get_payslip = PaySlip.objects.filter(employee_payslip = employee)
+                    get_payslip = PaySlip.objects.filter(employee_payslip = employee, admin_confirmation=True).select_related('employee_payslip')
                     if get_payslip:
                         payslip = get_payslip.last()
 
@@ -689,8 +547,12 @@ class PayRollView(LoginRequiredMixin, View):
 
     def post(self, request):
         request.GET.get('q') == "ajax"
-        if request.user.is_superuser == True:
-            gererate_payslip = pay_slip_pdf_generate()
+        if self.request.user.is_superuser == True:
+            selected_employee = request.POST.get("selected_employee")
+            if selected_employee != "ALL":
+                gererate_payslip = InitializePayslip.pay_slip_initialize(selected_employee)
+            else:
+                gererate_payslip = InitializePayslip.pay_slip_initialize()
             if gererate_payslip['status']==True:
                 messages.add_message(request, messages.SUCCESS, "Salary Slip is generated.")
                 return redirect("/payroll_expenses/")
@@ -700,85 +562,244 @@ class PayRollView(LoginRequiredMixin, View):
         else:
             return HttpResponse("Only admin can Access..")
 
-
-def pay_slip_pdf_generate():
-    all_employee = Employee.objects.filter(role="EMPLOYEE")
-    ok_flag = True
-    if all_employee:
-        for employee in all_employee:
-            if not (employee.name and employee.department and employee.designation and employee.salary and EmployeeBankDetail.objects.filter(employee_bankdetail=employee).exists()):
-                ok_flag = False
-                break
-        if ok_flag == True:
-            for employee in all_employee:
-                total_leave_days = 0
-                full_day = 0
-                half_day = 0
-                employee_leave = LeaveManagement.objects.filter(employee_id=employee, status="APPROVED", leave_type="UNPAID", leave_start_date__month=PRE_MONTH.month)
-                print("EMPLOYEE: ", employee, total_leave_days, employee_leave)
-                for leave in employee_leave:
-                    if leave.leave_start_date.month == PRE_MONTH.month:
-                        if leave.leave_requested_for == "F":
-                            full_day += 1
-                            total_leave_days += leave.leave_days*1
-                        else:
-                            half_day += 1
-                            total_leave_days += leave.leave_days*0.5
-                effective_working_day = TOTAL_DAYS-total_leave_days
-
-                employee_total_earning = int(effective_working_day*(employee.salary/TOTAL_DAYS))
-                earning_in_words = numtowords(employee_total_earning)
-
-            #----creating unique pdf name---------------------------
-                do = DATE_OBJECT.strftime("%B%Y").upper()
-                pdf_name=f"{do}{employee.user.username}.pdf"
-
-            #--------------------find each employee bank detail---------------------------
+class ProceedToGeneratePayslip(LoginRequiredMixin, View):
+    def get(self, request):
+        if self.request.user.is_superuser == True:
+            payslips = PaySlip.objects.filter(dispatch_date__month=date.today().month, admin_confirmation=False).select_related('employee_payslip')
+            for payslip in payslips:
+                employee = Employee.objects.get(user=payslip.employee_payslip.user)
+                #--------------------find each employee bank detail---------------------------
                 emp_bankdetail = EmployeeBankDetail.objects.get(employee_bankdetail=employee)
-
-            #--- Define Filepath where PDF Save -----------------------------------
-                filedir = 'media/pdf_file/'
-                filepath = os.path.join(filedir,pdf_name)
-
-            #---this is base_data that will be change by month----------------------
-                base_data ={'total_earn': employee_total_earning,
-                            'effectiveworks':TOTAL_DAYS,
-                            'losspayday': int(math.ceil(total_leave_days)),
-                            'totalpaydays': int(effective_working_day),
-                            'earning_in_words':earning_in_words,
-                            'salary_month_name':SALARY_MONTH,
-                            'employee_joining_date':employee.user.date_joined.date(),
-                            'filepath':filepath,
-                            }
-            #---check pdf is generated or not---------------
-                oldpayslip = PaySlip.objects.filter(employee_payslip = employee, payslip_name = pdf_name)
-            #---create new payslip object----------------
-                if not oldpayslip:
-                    create_payslip = PaySlip.objects.create(
-                        employee_payslip = employee,
-                        path = filepath,
-                        dispatch_date = date.today(),
-                        leave_taken = total_leave_days,
-                        full_day = full_day,
-                        half_day = half_day,
-                        salary=employee.salary,
-                        payslip_name= pdf_name,
-                        earning=base_data['total_earn'])
-                    create_payslip.save()
-            #----generate pdf only if old pdf not register for old month-------------
-                    context = {'employee':employee, 'base_data':base_data, 'bank_detail':emp_bankdetail}
-                    generate_pdf(context, send_email=True)
-                else:
-                    print("salary is already generated.")
-                    return {"status": False, "Error": "Salary slip already generated"}
-            print("salary generated successfully")
-            return {"status": True}
+                base_data ={
+                    'total_earn': payslip.earning,
+                    'effectiveworks': payslip.effective_work_days,
+                    'losspayday': fix_to_two_digit(payslip.loss_pay_days),
+                    'totalpaydays': fix_to_two_digit(payslip.total_pay_days),
+                    'leave_deduction': (payslip.salary+payslip.addition_amount)-(payslip.earning+payslip.deduction_amount),
+                    'additional_title': payslip.addition_title,
+                    'additional_amount': payslip.addition_amount,
+                    'deduction_title': payslip.deduction_title,
+                    'deduction_amount': payslip.deduction_amount,
+                    'earning_in_words': numtowords(payslip.earning),
+                    'salary_month_name': payslip.salary_month_name,
+                    'employee_joining_date':employee.user.date_joined.date(),
+                    'filepath':payslip.path,
+                }
+                extra_line = False
+                if int(base_data["additional_amount"]) != 0 or int(base_data["deduction_amount"]) != 0:
+                    extra_line = True
+                #----generate pdf only if old pdf not register for old month-------------
+                context = {'employee':employee, 'base_data':base_data, 'bank_detail':emp_bankdetail, 'extra_line': extra_line}
+                if os.path.exists(base_data['filepath']):
+                    os.remove(base_data['filepath'])
+                generate_pdf(context, send_email=True)
+            payslips.update(admin_confirmation=True)
+            messages.add_message(request, messages.SUCCESS, "Salary have sent to Employee.")
+            return redirect("/payroll_expenses/")
         else:
-            print(f"Either employee name, department, designation, salary and Bank Details or anyone of these is missing for user, {employee.user}. Please provide it first.")
-            return {"status": False, "Error": f"Either employee name, department, designation, salary and Bank Details or anyone of these is missing for user, {employee.user}. Please provide it first."}
-    else:
-        print("There is no Employee.")
-        return {"status": False, "Error": "No Employee"}
+            return HttpResponse("Only admin can Access..")
+
+class StopPayslip(LoginRequiredMixin, View):
+    def get(self, request):
+        if self.request.user.is_superuser == True:
+            PaySlip.objects.filter(dispatch_date__month=date.today().month, admin_confirmation=False).delete()
+            messages.add_message(request, messages.SUCCESS, "Salary Slip Deleted.")
+            return redirect("/payroll_expenses/")
+        else:
+            return HttpResponse("Only admin can Access..")
+
+class SendPayslip(LoginRequiredMixin, View):
+    def get(self, request):
+        if self.request.user.is_superuser == True:
+            all_employee = Employee.objects.filter(role="EMPLOYEE").select_related('user')
+            #---check pdf is generated or not---------------
+            payslip_exist = PaySlip.objects.filter(dispatch_date__month=date.today().month, admin_confirmation=True, dispatched_payslip=False)
+            month = (datetime.now() - timedelta(days=5)).strftime('%B')
+            if payslip_exist:
+                for employee in all_employee:
+                    payslip = PaySlip.objects.get(employee_payslip=employee, dispatch_date__month=date.today().month)
+                    filename = payslip.payslip_name
+                    #--- Define Filepath where PDF Save -----------------------------------
+                    filedir = 'media/pdf_file/'
+                    filepath = os.path.join(filedir,filename)
+                    emailTo = [employee.user.email]
+                    Mailer(
+                        subject=f"{'Your Payslip for month '}{month}",
+                        message="Here is your payslip",
+                        email_to = emailTo
+                    ).send(filepath)
+                    payslip.dispatched_payslip = True
+                    payslip.dispatch_date = date.today()
+                    payslip.save()
+                messages.add_message(request, messages.SUCCESS, "Payslip has been sent to Employee.")
+                return redirect("/payroll_expenses/")
+            else:
+                messages.add_message(request, messages.WARNING, "Either Payslip not generated or admin not confirm the payslip.")
+                return redirect("/payroll_expenses/")
+        else:
+            return HttpResponse("Only admin can Access..")
+
+
+class InitializePayslip(View):
+    def pay_slip_initialize(user=None):
+        if user:
+            all_employee = Employee.objects.filter(user__username=user).select_related('user')
+        else:
+            all_employee = Employee.objects.filter(role="EMPLOYEE").select_related('user')
+        ok_flag = True
+        payslip_flag = False
+        if all_employee:
+            for employee in all_employee:
+                if not (employee.name and employee.department and employee.designation and employee.salary and EmployeeBankDetail.objects.filter(employee_bankdetail=employee).exists()):
+                    ok_flag = False
+                    break
+            if ok_flag == True:
+                for employee in all_employee:
+                    employee_leaves = leave_calculate(employee, TOTAL_DAYS, PRE_MONTH.month)
+                    employee_total_earning = int(employee_leaves["days_payable"]*(employee.salary/TOTAL_DAYS))
+                    earning_in_words = numtowords(employee_total_earning)
+
+                #----creating unique pdf name---------------------------
+                    do = DATE_OBJECT.strftime("%B%Y").upper()
+                    pdf_name=f"{do}{employee.user.username}.pdf"
+
+                #--- Define Filepath where PDF Save -----------------------------------
+                    filedir = 'media/pdf_file/'
+                    filepath = os.path.join(filedir,pdf_name)
+                    
+                #---this is base_data that will be change by month----------------------
+                    base_data ={'total_earn': employee_total_earning,
+                                'effectiveworks': TOTAL_DAYS,
+                                'losspayday': employee_leaves["total_leave_days"],
+                                'totalpaydays': employee_leaves["days_payable"],
+                                'earning_in_words': earning_in_words,
+                                'salary_month_name': SALARY_MONTH,
+                                'employee_joining_date': employee.user.date_joined.date(),
+                                'filepath': filepath,
+                                }
+                #---check pdf is generated or not---------------
+                    oldpayslip = PaySlip.objects.filter(employee_payslip = employee, payslip_name = pdf_name)
+                #---create new payslip object-------------------
+                    if not oldpayslip:
+                        create_payslip = PaySlip.objects.create(
+                            employee_payslip = employee,
+                            path = filepath,
+                            dispatch_date = date.today(),
+                            leave_taken = employee_leaves["total_leave_days"],
+                            full_day = employee_leaves["full_day"],
+                            half_day = employee_leaves["half_day"],
+                            salary = employee.salary,
+                            payslip_name = pdf_name,
+                            earning = base_data['total_earn'],
+                            effective_work_days = base_data['effectiveworks'],
+                            loss_pay_days = base_data['losspayday'],
+                            total_pay_days = base_data['totalpaydays'],
+                            salary_month_name = base_data['salary_month_name']
+                            )
+                        create_payslip.save()
+                        payslip_flag = True
+                    else:
+                        if user:
+                            return {"status": False, "Error": f"Salary slip already requested for {employee.name}."}
+                        else:
+                            continue
+                if payslip_flag:
+                    return {"status": True}
+                else:
+                    return {"status": False, "Error": "Salary slip already requested for all employee."}
+            else:
+                return {"status": False, "Error": f"Either employee name, department, designation, salary and Bank Details or anyone of these is missing for user, {employee.user}. Please provide it first."}
+        else:
+            return {"status": False, "Error": "No Employee"}
+
+#---------- Here allows to update payroll details --------------------------- 
+class PayRollUpdate(LoginRequiredMixin, View):
+    def get(self, request, id=None):
+        if self.request.user.is_superuser:
+            if request.GET.get("payroll_id"):
+                payslip = PaySlip.objects.select_related('employee_payslip').get(id=request.GET.get("payroll_id"))
+            else:
+                payslip = PaySlip.objects.select_related('employee_payslip').get(id=id)
+            jsondata = {
+                'employee': payslip.employee_payslip.name,
+                'department': payslip.employee_payslip.department,
+                'full_day': payslip.full_day,
+                'half_day': payslip.half_day,
+                'deduction': payslip.deduction,
+                'salary': payslip.salary,
+                'earning': payslip.earning,
+                'effective_work_days': payslip.effective_work_days,
+                'loss_pay_days': payslip.loss_pay_days,
+                'total_pay_days': payslip.total_pay_days,
+                'leave_taken': payslip.leave_taken,
+                'addition_title': payslip.addition_title,
+                'addition_amount': payslip.addition_amount,
+                'deduction_title': payslip.deduction_title,
+                'deduction_amount': payslip.deduction_amount,
+            }
+            return JsonResponse(jsondata)
+        
+    def post(self, request):
+        if self.request.user.is_superuser:
+            payroll_id = request.POST.get("payroll_id")
+            employee_name = request.POST.get("emp_name")
+            department = request.POST.get("department")
+            full_day = int(request.POST.get("full_day"))
+            half_day = int(request.POST.get("half_day"))
+            addition_title = request.POST.get("addition_title")
+            addition_amount = int(request.POST.get("addition_amount"))
+            deduction_title = request.POST.get("deduction_title")
+            deduction_amount = int(request.POST.get("deduction_amount"))
+            salary = int(request.POST.get("salary"))
+            earning = salary - (((full_day*1) + (half_day*0.5)) * (salary / TOTAL_DAYS)) + addition_amount - deduction_amount
+            effective_work_days = request.POST.get("effective_work_days")
+            loss_pay_days = request.POST.get("loss_pay_days")
+            total_pay_days = request.POST.get("total_pay_days")
+
+            if addition_title == None or addition_title.strip() == "" and addition_amount != 0:
+                messages.add_message(request, messages.WARNING, "Please define additional title and additional amount both.")
+                return redirect('payroll_expense')
+            if deduction_title == None or deduction_title.strip() == "" and deduction_amount != 0:
+                messages.add_message(request, messages.WARNING, "Please define deduction title and deduction amount both.")
+                return redirect('payroll_expense')
+
+            payroll = PaySlip.objects.get(id=payroll_id)
+            if payroll.employee_payslip.name == employee_name and payroll.employee_payslip.department == department:
+                emp  = EmployeeManager.objects.get(user__username=payroll.employee_payslip.user)
+                leave_reason = request.POST.get("leave_reason")
+                leave_type = request.POST.get("leave_type")
+                leave_requested_for = request.POST.get("leave_requested_for")
+                leave_days = request.POST.get("leave_days")
+                start_date = request.POST.get("leave_start_date")
+                
+                payroll.full_day = full_day
+                payroll.half_day = half_day
+                payroll.earning = earning
+                payroll.effective_work_days = effective_work_days
+                payroll.loss_pay_days = loss_pay_days
+                payroll.total_pay_days = total_pay_days
+                payroll.addition_title = addition_title
+                payroll.addition_amount = addition_amount
+                payroll.deduction_title = deduction_title
+                payroll.deduction_amount = deduction_amount
+                payroll.dispatched_payslip = False
+                payroll.admin_confirmation = False
+                
+                if leave_reason != "" and leave_days != "" and start_date != "":
+                    start_date = datetime.strptime(request.POST.get("leave_start_date"), '%Y-%m-%d').date()
+                    create_leave = leave_create(emp, leave_reason, int(leave_days), leave_requested_for, leave_type, start_date)
+                    if create_leave['status'] == True:
+                        payroll.save()
+                        messages.add_message(request, messages.SUCCESS, "Leave and Payroll has been updated.")
+                        return redirect('payroll_expense')
+                    else:
+                        messages.add_message(request, messages.WARNING, create_leave['error'])
+                        return redirect('payroll_expense')
+                else:
+                    messages.add_message(request, messages.SUCCESS, "Payroll has been updated.")
+                    payroll.save()
+            return redirect('payroll_expense')
+        return HttpResponse("Only admin can Access..")
 
 
 class EmployeeProfileAdmin(View):
@@ -786,7 +807,7 @@ class EmployeeProfileAdmin(View):
         if self.request.user.is_superuser==True:
             emps = Employee.objects.exclude(role='ADMIN')
             year = datetime.now().year
-            emp = Employee.objects.get(id = pk)
+            emp = Employee.objects.select_related('user').get(id = pk)
             reporting = Employee.objects.filter(department=emp.department)
             date_joined = emp.user.date_joined
             joining_date = date_joined.date().strftime("%d-%m-%Y")

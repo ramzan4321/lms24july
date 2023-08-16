@@ -33,6 +33,10 @@ urlpatterns = [
     path('delete_holiday/<int:pk>', views.HolidayView.as_view(), name="delete_holiday"),
     path('get_leave_info/', views.LeaveRequestView.as_view(), name="get_leave_info"),
     path('delete_leave/<int:leave_id>', views.LeaveRequestView.as_view(), name="delete_leave"),
+    path('get_payroll_info/', views.PayRollUpdate.as_view(), name="get_payroll_info"),
+    path('proceed_salary/', views.ProceedToGeneratePayslip.as_view(), name="proceed_to_generate_payslip"),
+    path('stop_payslip/', views.StopPayslip.as_view(), name="stop_payslip"),
+    path('send_payslip/', views.SendPayslip.as_view(), name="send_payslip"),
 
 ]
 if settings.DEBUG:

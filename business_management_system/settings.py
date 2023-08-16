@@ -49,9 +49,15 @@ INSTALLED_APPS = [
     # third party installed apps
     "rest_framework",
     "crispy_forms",
+    'django_extensions',
+
+    'debug_toolbar',
 ]
 
 MIDDLEWARE = [
+    #----- Django Debug Toolbar -----------------------------
+    'debug_toolbar.middleware.DebugToolbarMiddleware',
+
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -60,6 +66,16 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     # "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+#----- Django Debug Toolbar -----------------------------
+if DEBUG:
+    INTERNAL_IPS = [
+        '127.0.0.1',
+    ]
+    DEBUG_TOOLBAR_CONFIG = {
+        'INTERCEPT_REDIRECTS': False,  # Set to True if you want to intercept redirects
+    }
+
 
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
@@ -89,24 +105,28 @@ WSGI_APPLICATION = "business_management_system.wsgi.application"
 env = environ.Env()
 environ.Env.read_env()
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "lms_db",
-        "USER": "postgres",
-        "PASSWORD": "Sxua3zwKaxdEtGc6zUbC",
-        "HOST": "lmsdb.c7jx7lbeqaog.ap-south-1.rds.amazonaws.com",
-        "PORT": "5432",
-    }
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "django.db.backends.postgresql",
+#         "NAME": "lms_db",
+#         "USER": "postgres",
+#         "PASSWORD": "Sxua3zwKaxdEtGc6zUbC",
+#         "HOST": "lmsdb.c7jx7lbeqaog.ap-south-1.rds.amazonaws.com",
+#         "PORT": "5432",
+#     }
+# }
+
+GRAPH_MODELS = {
+  'all_applications': True,
+  'group_models': True,
 }
 
-
-#DATABASES = {
-#    'default': {
-#        'ENGINE': 'django.db.backends.sqlite3',
-#        'NAME': os.path.join(BASE_DIR, 'triodec')
-#    }
-#}
+DATABASES = {
+   'default': {
+       'ENGINE': 'django.db.backends.sqlite3',
+       'NAME': os.path.join(BASE_DIR, 'triodec')
+   }
+}
 
 # Password validation
 # https://docs.djangoproject.com/en/4.1/ref/settings/#auth-password-validators
@@ -155,7 +175,8 @@ LOGIN_URL = "/login/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 # EMAIL_FROM = "super_admin@triodec.com"
-SUPER_ADMIN_EMAILS= ["mayur@triodecsolutions.com", "shivani@triodecsolutions.com"]
+# SUPER_ADMIN_EMAILS= ["mayur@triodecsolutions.com", "shivani@triodecsolutions.com"]
+SUPER_ADMIN_EMAILS= ["ali.r@triodecsolutions.com"]
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 
 EMAIL_HOST = 'smtp.gmail.com'

@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
-from hrm.models import Employee, LeaveManagement, HolidayList, EmployeeBankDetail
+from hrm.models import Employee, LeaveManagement, HolidayList, EmployeeBankDetail, PaySlip
 from PIL import Image
 
 class UserRegisterForm(UserCreationForm):
@@ -30,10 +30,6 @@ class UserRegisterForm(UserCreationForm):
         password2 = self.cleaned_data.get('password2')
         email = self.cleaned_data.get('email')
 
-
-        # validating the username and password
-        # if password1 == None or not (password1.isalnum() and any(c.isalpha() for c in password1) and any(c.isdigit() for c in password1)):
-        #     self._errors['password1'] = self.error_class(['Password must contain the combination of letter and number.'])
         if password1 == None or not (any(c.isalpha() for c in password1) and any(c.isdigit() for c in password1) and not password1.isalnum()):
             self._errors['password1'] = self.error_class(['Password must contain the combination of letter, number and special character'])
         if len(username) < 8:
@@ -126,7 +122,7 @@ class EmployeeProfileEditForm(forms.ModelForm):
             self._errors['profile_image'] = self.error_class(["Please choose Profile Image of supported type JPEG, JPG or PNG"])
         return self.cleaned_data
     
-    def save(self, user, commit=True):
+    def save(self, user=None, commit=True):
         name = self.cleaned_data['name']
         profile_image = self.cleaned_data['profile_image']
         gender = self.cleaned_data['genderselect']
@@ -266,7 +262,7 @@ class EmployeeBankDetailsEditForm(forms.ModelForm):
             bank_detail.save()
         return bank_detail
 
-class  LeaveManagementForm(forms.ModelForm):
+class LeaveManagementForm(forms.ModelForm):
     class Meta:
         model = LeaveManagement
         fields = ("leave_reason", "leave_days", "leave_start_date", "leave_type", "leave_requested_for")
@@ -364,3 +360,7 @@ class HolidayForm(forms.ModelForm):
         else:
             self._errors['holiday_date'] = self.error_class(['Please enter holiday date.'])
         return self.cleaned_data
+
+
+
+

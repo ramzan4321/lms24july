@@ -31,7 +31,7 @@ def week_calendar(type=None, week=None):
         all_emp = Employee.objects.all()
         for emp in all_emp:
             tmp_leave_list = []
-            emp_leave = LeaveManagement.objects.filter(employee_id=emp,status="APPROVED")
+            emp_leave = LeaveManagement.objects.filter(employee_id=emp,status="APPROVED").select_related('employee_id')
             if emp_leave:
                 for y in emp_leave:
                     y_days_in_leave = Date(y.leave_start_date).get_next_working_days(y.leave_days)
@@ -55,7 +55,7 @@ def week_calendar(type=None, week=None):
         all_emp = Employee.objects.all()
         for emp in all_emp:
             tmp_leave_list = []
-            emp_leave = LeaveManagement.objects.filter(employee_id=emp,status="APPROVED")
+            emp_leave = LeaveManagement.objects.filter(employee_id=emp,status="APPROVED").select_related('employee_id')
 
             if emp_leave:
                 for y in emp_leave:
